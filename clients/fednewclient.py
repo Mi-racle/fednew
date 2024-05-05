@@ -1,16 +1,18 @@
 from collections import OrderedDict
 from copy import deepcopy
+from functools import reduce
 from logging import INFO
 from typing import Dict, Tuple, List, Union
 
 import flwr as fl
+import numpy as np
 import torch
 import torch.nn as nn
 from datasets import Dataset
 from datasets.utils.logging import disable_progress_bar
 from flwr.common import Metrics
 from flwr.common.logger import log
-from flwr.common.typing import Scalar
+from flwr.common.typing import Scalar, NDArrays
 from flwr_datasets import FederatedDataset
 from net import resnet18
 from torch.utils.data import DataLoader
@@ -38,6 +40,9 @@ class FedNewClient(fl.client.NumPyClient):
         self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
         self.model.to(self.device)  # send model to device
 
+        self.last_distribution = None
+        self.current_distribution = None
+
     def get_parameters(self, config):
         return [val.cpu().numpy() for name, val in self.model.state_dict().items() if 'bn' not in name]
 
@@ -50,12 +55,13 @@ class FedNewClient(fl.client.NumPyClient):
         # cifar batch 64
         valloader = DataLoader(self.valset, batch_size=64, drop_last=True)
 
-        distribution = self.evaluate_distribution(valloader)
+        self.last_distribution = self.current_distribution
+        self.current_distribution = self.evaluate_distribution(valloader)
 
         trainloader = DataLoader(self.trainset, batch_size=config['batch'], shuffle=True, drop_last=True)
 
         # Return local model and statistics
-        return self.get_parameters({}), len(trainloader.dataset), {'distribution': distribution}
+        return self.get_parameters({}), len(trainloader.dataset), {'distribution': self.current_distribution}
 
     def evaluate(self, parameters, config):
         self.cluster_models = set_params(self.model, parameters, self.cid)
@@ -73,9 +79,14 @@ class FedNewClient(fl.client.NumPyClient):
         # Define optimizer
         optimizer = torch.optim.SGD(self.model.parameters(), lr=0.01, momentum=0.9)
         # Train
-        self.train(trainloader, optimizer, epochs=epochs, patience=patience, device=self.device)
-
-        loss, accuracy = self.test(valloader, device=self.device)
+        self.train(
+            trainloader,
+            optimizer,
+            epochs=epochs,
+            patience=patience,
+            proximal_mu=proximal_mu,
+            device=self.device
+        )
 
         # cifar batch 64
         valloader = DataLoader(self.valset, batch_size=64, drop_last=True)
@@ -86,9 +97,21 @@ class FedNewClient(fl.client.NumPyClient):
         # Return statistics
         return float(loss), len(valloader.dataset), {'loss': float(loss), 'accuracy': float(accuracy)}
 
-    def train(self, trainloader, optim, epochs, patience, device: Union[str, torch.device]):
+    def train(self, trainloader, optim, epochs, patience, proximal_mu, device: Union[str, torch.device]):
         """Train the network on the training set."""
         criterion = nn.CrossEntropyLoss()
+        euclidean = nn.MSELoss()
+        weighted_weights = []
+        for cluster_id, weights in enumerate(self.cluster_models):
+            weighted_weights.append(
+                [
+                    layer * self.current_distribution[cluster_id] for layer in weights
+                ]
+            )
+        global_model: NDArrays = [
+            reduce(np.add, layer_updates) / sum(self.current_distribution)
+            for layer_updates in zip(*weighted_weights)
+        ]
         self.model.train()
         for _ in range(epochs):
             for batch in trainloader:
@@ -96,7 +119,11 @@ class FedNewClient(fl.client.NumPyClient):
                 images, labels = batch[image_key].to(device), batch['label'].to(device)
                 optim.zero_grad()
                 loss = criterion(self.model(images), labels)
+                if self.last_distribution is not None:
+                    loss += euclidean(self.last_distribution, self.current_distribution)
                 loss.backward()
+                for w, w_t in zip(self.model, global_model):
+                    w.grad.data += proximal_mu * (w.data - w_t.data)
                 optim.step()
 
     def test(self, testloader, device: Union[str, torch.device]):

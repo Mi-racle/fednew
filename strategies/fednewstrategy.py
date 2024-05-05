@@ -175,20 +175,33 @@ class FedNew(FedAvg):
     def _aggregate(self, results: List[Tuple[NDArrays, int]]) -> NDArrays:
         """Compute weighted average."""
 
-        distributions = [distribution for (_, distribution) in results]
+        distributions = np.array([distribution for (_, distribution) in results])
+        distribution_sum = np.sum(distributions, axis=0)
 
-
+        cluster_num = len(distribution_sum)
 
         # Create a list of weights, each multiplied by the related number of examples
         # list[list[ndarray]] / [num_clients][num_layers][...]
-        weighted_weights = [
-            [layer * num_examples for layer in weights] for weights, num_examples in results
-        ]
 
-        # Compute average weights of each layer
-        weights_prime: NDArrays = [
-            reduce(np.add, layer_updates) / num_examples_total
-            for layer_updates in zip(*weighted_weights)
-        ]
+        weights_prime: NDArrays = []
+
+        for cluster_id in range(cluster_num):
+            weighted_weights = []
+
+            for client_id, (weights, _) in enumerate(results):
+                weighted_weights.append(
+                    [
+                        layer * distribution_sum[client_id][cluster_id] for layer in weights
+                    ]
+                )
+
+            # Compute average weights of each layer
+            aggregated_weights: NDArrays = [
+                reduce(np.add, layer_updates) / distribution_sum[cluster_id]
+                for layer_updates in zip(*weighted_weights)
+            ]
+
+            for layer in aggregated_weights:
+                weights_prime.append(layer)
 
         return weights_prime

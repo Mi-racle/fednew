@@ -9,6 +9,8 @@ from datasets import disable_progress_bar
 from flwr.common import log
 from flwr_datasets import FederatedDataset
 
+from clients.fednewclient import fit_config, weighted_average, get_new_evaluate_fn, get_new_client_fn
+from partitioner import DirichletPartitioner, LabelPartitioner
 from strategies.fednewstrategy import FedNew
 from utils import increment_path
 
@@ -61,7 +63,7 @@ def main():
         ),  # Wait until at least min_available_clients clients are available
         on_fit_config_fn=fit_config,
         evaluate_metrics_aggregation_fn=weighted_average,  # Aggregate federated metrics
-        evaluate_fn=get_evaluate_fn(centralized_testset),  # Global evaluation function
+        evaluate_fn=get_new_evaluate_fn(centralized_testset),  # Global evaluation function
         proximal_mu=mu
     )
     log(INFO, f'FedNew with mu=={mu}')
@@ -86,7 +88,7 @@ def main():
 
     # Start simulation
     fl.simulation.start_simulation(
-        client_fn=get_client_fn(mnist_fds),
+        client_fn=get_new_client_fn(mnist_fds),
         num_clients=num_clients,
         client_resources=client_resources,
         config=fl.server.ServerConfig(num_rounds=num_rounds),

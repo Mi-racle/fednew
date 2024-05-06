@@ -1,3 +1,4 @@
+import json
 from collections import OrderedDict
 from copy import deepcopy
 from functools import reduce
@@ -10,7 +11,7 @@ import torch
 import torch.nn as nn
 from datasets import Dataset
 from datasets.utils.logging import disable_progress_bar
-from flwr.common import Metrics
+from flwr.common import Metrics, parameters_to_ndarrays
 from flwr.common.logger import log
 from flwr.common.typing import Scalar, NDArrays
 from flwr_datasets import FederatedDataset
@@ -43,6 +44,12 @@ class FedNewClient(fl.client.NumPyClient):
         self.last_distribution = None
         self.current_distribution = None
 
+        self.batch_size = 32
+        self.epochs = 5
+        self.patience = 10
+        self.server_round = 100
+        self.proximal_mu = 0.1
+
     def get_parameters(self, config):
         return [val.cpu().numpy() for name, val in self.model.state_dict().items() if 'bn' not in name]
 
@@ -50,6 +57,9 @@ class FedNewClient(fl.client.NumPyClient):
         """
         config == fit_config() + proximal_mu
         """
+        self.batch_size, self.epochs, self.patience, self.server_round, self.proximal_mu = \
+            config['batch_size'], config['epochs'], config['patience'], config['server_round'], config['proximal_mu']
+
         self.cluster_models = set_params(self.model, parameters, self.cid)
 
         # cifar batch 64
@@ -58,7 +68,7 @@ class FedNewClient(fl.client.NumPyClient):
         self.last_distribution = self.current_distribution
         self.current_distribution = self.evaluate_distribution(valloader)
 
-        trainloader = DataLoader(self.trainset, batch_size=config['batch'], shuffle=True, drop_last=True)
+        trainloader = DataLoader(self.trainset, batch_size=self.batch_size, shuffle=True, drop_last=True)
 
         # Return local model and statistics
         return self.get_parameters({}), len(trainloader.dataset), {'distribution': self.current_distribution}
@@ -69,12 +79,8 @@ class FedNewClient(fl.client.NumPyClient):
         if self.cid == 0:
             torch.save(self.model.state_dict(), 'best.pt')
 
-        # Read from config
-        batch, epochs, patience, server_round, proximal_mu = \
-            config['batch_size'], config['epochs'], config['patience'], config['server_round'], config['proximal_mu']
-
         # Construct dataloader
-        trainloader = DataLoader(self.trainset, batch_size=batch, shuffle=True, drop_last=True)
+        trainloader = DataLoader(self.trainset, batch_size=self.batch_size, shuffle=True, drop_last=True)
 
         # Define optimizer
         optimizer = torch.optim.SGD(self.model.parameters(), lr=0.01, momentum=0.9)
@@ -82,9 +88,9 @@ class FedNewClient(fl.client.NumPyClient):
         self.train(
             trainloader,
             optimizer,
-            epochs=epochs,
-            patience=patience,
-            proximal_mu=proximal_mu,
+            epochs=self.epochs,
+            patience=self.patience,
+            proximal_mu=self.proximal_mu,
             device=self.device
         )
 
@@ -102,7 +108,9 @@ class FedNewClient(fl.client.NumPyClient):
         criterion = nn.CrossEntropyLoss()
         euclidean = nn.MSELoss()
         weighted_weights = []
-        for cluster_id, weights in enumerate(self.cluster_models):
+        for cluster_id, model in enumerate(self.cluster_models):
+            weights = [val.cpu().numpy() for name, val in model.state_dict().items() if 'bn' not in name]
+            weights = np.array(weights)
             weighted_weights.append(
                 [
                     layer * self.current_distribution[cluster_id] for layer in weights

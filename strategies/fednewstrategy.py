@@ -191,7 +191,7 @@ class FedNew(FedAvg):
             for client_id, (weights, _) in enumerate(results):
                 weighted_weights.append(
                     [
-                        layer * distribution_sum[client_id][cluster_id] for layer in weights
+                        layer * distributions[client_id][cluster_id] for layer in weights
                     ]
                 )
 

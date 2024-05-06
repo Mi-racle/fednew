@@ -33,14 +33,13 @@ def main():
     num_gpus = args.num_gpus
     num_clients = args.num_clients
     num_rounds = args.num_rounds
-    affinity = args.affinity
     dataset = args.dataset
     mu = args.mu
     partitioner = args.partitioner
 
     # Download MNIST dataset and partition it
     mnist_fds = FederatedDataset(
-        dataset=f'./{dataset}',
+        dataset=f'{dataset}',
         partitioners={
             'train':
                 num_clients if partitioner == 'iid' else (
@@ -76,15 +75,15 @@ def main():
 
     if not os.path.exists('runs'):
         os.mkdir('runs')
-    with open(f'runs/loss_{affinity}.txt', 'a+') as fout:
+    with open(f'runs/loss_avg.txt', 'a+') as fout:
         fout.write('---------------------------------------------\n')
-    with open(f'runs/accuracy_{affinity}.txt', 'a+') as fout:
+    with open(f'runs/accuracy_avg.txt', 'a+') as fout:
         fout.write('---------------------------------------------\n')
-    with open(f'runs/cluster_{affinity}.txt', 'a+') as fout:
+    with open(f'runs/cluster_avg.txt', 'a+') as fout:
         fout.write('---------------------------------------------\n')
 
     # Start Logger
-    fl.common.logger.configure(identifier='Experiment', filename=increment_path(f'runs/log_{affinity}.txt'))
+    fl.common.logger.configure(identifier='Experiment', filename=increment_path(f'runs/log_avg.txt'))
 
     # Start simulation
     fl.simulation.start_simulation(

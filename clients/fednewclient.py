@@ -41,12 +41,12 @@ class FedNewClient(fl.client.NumPyClient):
         self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
         self.model.to(self.device)  # send model to device
 
-        self.last_distribution = None
-        self.current_distribution = None
+        self.last_distribution = []
+        self.current_distribution = []
 
         self.batch_size = 32
         self.epochs = 5
-        self.patience = 10
+        self.patience = 5
         self.server_round = 100
         self.proximal_mu = 0.1
 
@@ -61,6 +61,8 @@ class FedNewClient(fl.client.NumPyClient):
             config['batch_size'], config['epochs'], config['patience'], config['server_round'], config['proximal_mu']
 
         self.cluster_models = set_params(self.model, parameters, self.cid)
+        if len(self.cluster_models) == 1:
+            self.cluster_models.append(deepcopy(self.cluster_models[0]))
 
         # cifar batch 64
         valloader = DataLoader(self.valset, batch_size=64, drop_last=True)
@@ -127,7 +129,7 @@ class FedNewClient(fl.client.NumPyClient):
                 images, labels = batch[image_key].to(device), batch['label'].to(device)
                 optim.zero_grad()
                 loss = criterion(self.model(images), labels)
-                if self.last_distribution is not None:
+                if not self.last_distribution:
                     loss += euclidean(self.last_distribution, self.current_distribution)
                 loss.backward()
                 for w, w_t in zip(self.model, global_model):

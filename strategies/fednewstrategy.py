@@ -75,6 +75,31 @@ class FedNew(FedAvg):
             for client, fit_ins in client_config_pairs
         ]
 
+    def configure_evaluate(
+            self, server_round: int, parameters: Parameters, client_manager: ClientManager
+    ) -> List[Tuple[ClientProxy, FitIns]]:
+        """Configure the next round of training.
+
+        Sends the proximal factor mu to the clients
+        """
+        # Get the standard client/config pairs from the FedAvg super-class
+        client_config_pairs = super().configure_evaluate(
+            server_round, parameters, client_manager
+        )
+
+        # Return client/config pairs with the proximal factor mu added
+        return [
+            (
+                client,
+                FitIns(
+                    fit_ins.parameters,
+                    {**fit_ins.config, 'proximal_mu': self.proximal_mu},
+                ),
+            )
+            for client, fit_ins in client_config_pairs
+        ]
+
+
     def aggregate_fit(
             self,
             server_round: int,

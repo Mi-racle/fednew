@@ -9,7 +9,7 @@ from datasets import disable_progress_bar
 from flwr.common import log
 from flwr_datasets import FederatedDataset
 
-from clients.fednewclient import fit_config, weighted_average, get_new_evaluate_fn, get_new_client_fn
+from clients.fednewclient import fit_config, weighted_average, get_new_evaluate_fn, get_new_client_fn, evaluate_config
 from partitioner import DirichletPartitioner, LabelPartitioner
 from strategies.fednewstrategy import FedNew
 from utils import increment_path
@@ -61,6 +61,7 @@ def main():
             num_clients * 1
         ),  # Wait until at least min_available_clients clients are available
         on_fit_config_fn=fit_config,
+        on_evaluate_config_fn=evaluate_config,
         evaluate_metrics_aggregation_fn=weighted_average,  # Aggregate federated metrics
         evaluate_fn=get_new_evaluate_fn(centralized_testset),  # Global evaluation function
         proximal_mu=mu
@@ -75,19 +76,21 @@ def main():
 
     if not os.path.exists('runs'):
         os.mkdir('runs')
-    with open(f'runs/loss_avg.txt', 'a+') as fout:
+    output_dir = increment_path('runs/fednew')
+    os.mkdir(increment_path(output_dir))
+    with open(f'{output_dir}/loss.txt', 'a+') as fout:
         fout.write('---------------------------------------------\n')
-    with open(f'runs/accuracy_avg.txt', 'a+') as fout:
+    with open(f'{output_dir}/accuracy.txt', 'a+') as fout:
         fout.write('---------------------------------------------\n')
-    with open(f'runs/cluster_avg.txt', 'a+') as fout:
+    with open(f'{output_dir}/cluster.txt', 'a+') as fout:
         fout.write('---------------------------------------------\n')
 
     # Start Logger
-    fl.common.logger.configure(identifier='Experiment', filename=increment_path(f'runs/log_avg.txt'))
+    fl.common.logger.configure(identifier='Experiment', filename=f'{output_dir}/log_avg.txt')
 
     # Start simulation
     fl.simulation.start_simulation(
-        client_fn=get_new_client_fn(mnist_fds),
+        client_fn=get_new_client_fn(mnist_fds, output_dir),
         num_clients=num_clients,
         client_resources=client_resources,
         config=fl.server.ServerConfig(num_rounds=num_rounds),

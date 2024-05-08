@@ -1,8 +1,10 @@
+import csv
 import json
 from collections import OrderedDict
 from copy import deepcopy
 from functools import reduce
 from logging import INFO
+from pathlib import Path
 from typing import Dict, Tuple, List, Union
 
 import flwr as fl
@@ -28,11 +30,12 @@ class FedNewClient(fl.client.NumPyClient):
 
     cluster_models = []
 
-    def __init__(self, trainset, valset, cid):
+    def __init__(self, trainset, valset, cid, output_dir):
 
         self.trainset = trainset
         self.valset = valset
         self.cid = cid
+        self.output_dir = output_dir
 
         # Instantiate model
         self.model = NETWORK
@@ -44,12 +47,6 @@ class FedNewClient(fl.client.NumPyClient):
         self.last_distribution = []
         self.current_distribution = []
 
-        self.batch_size = 32
-        self.epochs = 5
-        self.patience = 5
-        self.server_round = 100
-        self.proximal_mu = 0.1
-
     def get_parameters(self, config):
         return [val.cpu().numpy() for name, val in self.model.state_dict().items() if 'bn' not in name]
 
@@ -57,20 +54,24 @@ class FedNewClient(fl.client.NumPyClient):
         """
         config == fit_config() + proximal_mu
         """
-        self.batch_size, self.epochs, self.patience, self.server_round, self.proximal_mu = \
+        batch_size, epochs, patience, server_round, proximal_mu = \
             config['batch_size'], config['epochs'], config['patience'], config['server_round'], config['proximal_mu']
 
+        self.model.load_state_dict(torch.load(f'{self.output_dir}/fednew{self.cid}.pt'))
         self.cluster_models = set_params(self.model, parameters, self.cid)
+
         if len(self.cluster_models) == 1:
             self.cluster_models.append(deepcopy(self.cluster_models[0]))
 
         # cifar batch 64
         valloader = DataLoader(self.valset, batch_size=64, drop_last=True)
 
-        self.last_distribution = self.current_distribution
-        self.current_distribution = self.evaluate_distribution(valloader)
+        distribution = self.evaluate_distribution(valloader)
+        with open(f'{self.output_dir}/distribution{self.cid}.csv', 'a', newline='') as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(distribution)
 
-        trainloader = DataLoader(self.trainset, batch_size=self.batch_size, shuffle=True, drop_last=True)
+        trainloader = DataLoader(self.trainset, batch_size=batch_size, shuffle=True, drop_last=True)
 
         # Return local model and statistics
         return self.get_parameters({}), len(trainloader.dataset), {'distribution': self.current_distribution}
@@ -78,11 +79,22 @@ class FedNewClient(fl.client.NumPyClient):
     def evaluate(self, parameters, config):
         self.cluster_models = set_params(self.model, parameters, self.cid)
 
-        if self.cid == 0:
-            torch.save(self.model.state_dict(), 'best.pt')
+        batch_size, epochs, patience, server_round, proximal_mu = \
+            config['batch_size'], config['epochs'], config['patience'], config['server_round'], config['proximal_mu']
+
+        self.model.load_state_dict(torch.load(f'{self.output_dir}/fednew{self.cid}.pt'))
+
+        distributions = []
+        with open(f'{self.output_dir}/distribution{self.cid}.csv', 'r', newline='') as csvfile:
+            reader = csv.reader(csvfile)
+            for row in reader:
+                distributions.append([int(item) for item in row])
+
+        current_distribution = distributions[-1]
+        last_distribution = distributions[-2] if len(distributions) > 1 else current_distribution
 
         # Construct dataloader
-        trainloader = DataLoader(self.trainset, batch_size=self.batch_size, shuffle=True, drop_last=True)
+        trainloader = DataLoader(self.trainset, batch_size=batch_size, shuffle=True, drop_last=True)
 
         # Define optimizer
         optimizer = torch.optim.SGD(self.model.parameters(), lr=0.01, momentum=0.9)
@@ -90,11 +102,15 @@ class FedNewClient(fl.client.NumPyClient):
         self.train(
             trainloader,
             optimizer,
-            epochs=self.epochs,
-            patience=self.patience,
-            proximal_mu=self.proximal_mu,
+            epochs=epochs,
+            patience=patience,
+            last_distribution=last_distribution,
+            current_distribution=current_distribution,
+            proximal_mu=proximal_mu,
             device=self.device
         )
+
+        torch.save(self.model, f'{self.output_dir}/fednew{self.cid}.pt')
 
         # cifar batch 64
         valloader = DataLoader(self.valset, batch_size=64, drop_last=True)
@@ -105,7 +121,7 @@ class FedNewClient(fl.client.NumPyClient):
         # Return statistics
         return float(loss), len(valloader.dataset), {'loss': float(loss), 'accuracy': float(accuracy)}
 
-    def train(self, trainloader, optim, epochs, patience, proximal_mu, device: Union[str, torch.device]):
+    def train(self, trainloader, optim, epochs, patience, last_distribution, current_distribution, proximal_mu, device: Union[str, torch.device]):
         """Train the network on the training set."""
         criterion = nn.CrossEntropyLoss()
         euclidean = nn.MSELoss()
@@ -115,11 +131,11 @@ class FedNewClient(fl.client.NumPyClient):
             weights = np.array(weights)
             weighted_weights.append(
                 [
-                    layer * self.current_distribution[cluster_id] for layer in weights
+                    layer * current_distribution[cluster_id] for layer in weights
                 ]
             )
         global_model: NDArrays = [
-            reduce(np.add, layer_updates) / sum(self.current_distribution)
+            reduce(np.add, layer_updates) / sum(current_distribution)
             for layer_updates in zip(*weighted_weights)
         ]
         self.model.train()
@@ -128,9 +144,7 @@ class FedNewClient(fl.client.NumPyClient):
                 image_key = 'image' if 'image' in batch else 'img'
                 images, labels = batch[image_key].to(device), batch['label'].to(device)
                 optim.zero_grad()
-                loss = criterion(self.model(images), labels)
-                if not self.last_distribution:
-                    loss += euclidean(self.last_distribution, self.current_distribution)
+                loss = criterion(self.model(images), labels) + proximal_mu * euclidean(last_distribution, current_distribution)
                 loss.backward()
                 for w, w_t in zip(self.model, global_model):
                     w.grad.data += proximal_mu * (w.data - w_t.data)
@@ -187,7 +201,7 @@ class FedNewClient(fl.client.NumPyClient):
         return distribution
 
 
-def get_new_client_fn(dataset: FederatedDataset):
+def get_new_client_fn(dataset: FederatedDataset, output_dir: Union[Path, str]):
     """Return a function to construct a client.
 
     The VirtualClientEngine will execute this function whenever a client is sampled by
@@ -210,7 +224,7 @@ def get_new_client_fn(dataset: FederatedDataset):
         valset = valset.with_transform(apply_transforms)
 
         # Create and return client
-        return FedNewClient(trainset, valset, int(cid)).to_client()
+        return FedNewClient(trainset, valset, int(cid), output_dir).to_client()
 
     return client_fn
 
@@ -220,6 +234,17 @@ def fit_config(server_round: int) -> Dict[str, Scalar]:
     config = {
         'epochs': 5,  # Number of local epochs done by clients
         'batch_size': 32,  # Batch size to use by clients during fit()
+        'patience': 5,  # early stopping (not working currently)
+        'server_round': server_round
+    }
+    return config
+
+
+def evaluate_config(server_round: int) -> Dict[str, Scalar]:
+    """Return a configuration with static batch size and (local) epochs."""
+    config = {
+        'epochs': 5,  # Number of local epochs done by clients
+        'batch_size': 32,  # Batch size to use by clients during evaluate()
         'patience': 5,  # early stopping (not working currently)
         'server_round': server_round
     }

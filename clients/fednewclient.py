@@ -54,11 +54,16 @@ class FedNewClient(fl.client.NumPyClient):
         batch_size, epochs, patience, server_round, proximal_mu = \
             config['batch_size'], config['epochs'], config['patience'], config['server_round'], config['proximal_mu']
 
-        self.model.load_state_dict(torch.load(f'{self.output_dir}/fednew{self.cid}.pt'))
         self.cluster_models = set_params(self.model, parameters, self.cid)
 
         if len(self.cluster_models) == 1:
             self.cluster_models.append(deepcopy(self.cluster_models[0]))
+
+        if server_round == 1:
+            self.model = self.cluster_models[0]
+            torch.save(self.model, f'{self.output_dir}/fednew{self.cid}.pt')
+        else:
+            self.model.load_state_dict(torch.load(f'{self.output_dir}/fednew{self.cid}.pt'))
 
         # cifar batch 64
         valloader = DataLoader(self.valset, batch_size=64, drop_last=True)

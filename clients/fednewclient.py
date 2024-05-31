@@ -44,9 +44,6 @@ class FedNewClient(fl.client.NumPyClient):
         self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
         self.model.to(self.device)  # send model to device
 
-        self.last_distribution = []
-        self.current_distribution = []
-
     def get_parameters(self, config):
         return [val.cpu().numpy() for name, val in self.model.state_dict().items() if 'bn' not in name]
 
